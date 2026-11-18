@@ -5,15 +5,20 @@ Source code is maintained separately and is not published in this repository.
 
 ## Latest APK
 
-[Download Android r7 - Auto Download](https://github.com/SilvanWu/foreverago-android-downloads/releases/download/android-r7-20261118/ForeverAgo-Android-AutoDownload-20261118-r7.apk)
+[Download Android r7a - Signature Compatibility](https://github.com/SilvanWu/foreverago-android-downloads/releases/download/android-r7a-20261118/ForeverAgo-Android-AutoDownload-20261118-r7a.apk)
 
-- APK: 1,650,781,918 bytes (approximately 1.54 GiB).
+- APK: 1,650,793,365 bytes (approximately 1.54 GiB).
 - First-launch story download: approximately 3.93 GiB, in verified128 MiB parts.
 - Android8.0 or newer; ARM64 phones and x86_64 emulators.
 - Package: com.academic.foreverago.qa; version0.1.15/code15.
-- SHA-256: 2754c0e34b49d1150d933afa0dddfd3808e6245ad371acb38bf568f2d64692d4.
+- SHA-256: 16c98e4887c05943facf012febd079f727312a9b922a6f742a72831d1b80e29b.
 - Non-development build using the existing test signing identity. This is a
   test distribution, not a Play Store production release.
+
+r7a keeps the same game payloads, version and signing identity as r7, but
+includes explicit v1/JAR certificate files in addition to v2 and v3 signatures.
+This follows a phone reporting missing certificates for r7. Local and cloud
+signature checks and emulator upgrade passed; that phone's result is pending.
 
 Install the APK from the latest Android release. Versions marked
 **Auto Download** retrieve matching story content on first launch.
