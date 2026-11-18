@@ -1,0 +1,99 @@
+name: Publish Signature Compatibility APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha256:
+        description: Verified complete compatibility APK hash
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: signature-compatibility-20261118
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      EXPECTED_HASH: ${{ inputs.sha256 }}
+    steps:
+      - name: Download original APK and signed-byte tail
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_HASH" =~ ^[0-9a-f]{64}$ ]]
+          mkdir base patch output
+          gh release download android-r7-20261118 --pattern '*.apk' --dir base
+          gh release download signature-staging-20261118 \
+            --pattern 'signature-delivery.json' --pattern 'apk-signature-tail.bin' --dir patch
+      - name: Reconstruct exact locally signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          m = json.loads(pathlib.Path("patch/signature-delivery.json").read_text())
+          assert m["schema"] == 1
+          assert m["sourceTag"] == "android-r7-20261118"
+          assert m["sourceFile"] == "ForeverAgo-Android-AutoDownload-20261118-r7.apk"
+          assert m["sourceSha256"] == "2754c0e34b49d1150d933afa0dddfd3808e6245ad371acb38bf568f2d64692d4"
+          assert m["sha256"] == os.environ["EXPECTED_HASH"]
+          assert m["outputFile"] == "ForeverAgo-Android-AutoDownload-20261118-r7a.apk"
+          assert m["tailFile"] == "apk-signature-tail.bin"
+          assert 0 < m["prefixBytes"] <= m["bytes"] < 2 * 1024**3
+          source = pathlib.Path("base") / m["sourceFile"]
+          with source.open("rb") as f:
+              assert hashlib.file_digest(f, "sha256").hexdigest() == m["sourceSha256"]
+          tail = pathlib.Path("patch") / m["tailFile"]
+          assert tail.stat().st_size < 1024**2
+          assert hashlib.sha256(tail.read_bytes()).hexdigest() == m["tailSha256"]
+          output = pathlib.Path("output") / m["outputFile"]
+          with source.open("rb") as f, output.open("wb") as out:
+              remaining = m["prefixBytes"]
+              while remaining:
+                  data = f.read(min(1024**2, remaining))
+                  assert data
+                  out.write(data)
+                  remaining -= len(data)
+              out.write(tail.read_bytes())
+          assert output.stat().st_size == m["bytes"]
+          with output.open("rb") as f:
+              assert hashlib.file_digest(f, "sha256").hexdigest() == os.environ["EXPECTED_HASH"]
+          pathlib.Path("output/SHA256SUMS.txt").write_text(f'{m["sha256"]}  {m["outputFile"]}\n')
+          print("Reconstructed bytes match the locally signed and verified APK exactly.")
+          PY
+      - name: Independently verify v1 v2 v3 signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          signer="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner | sort -V | tail -1)"
+          test -n "$signer"
+          "$signer" verify --verbose --print-certs --min-sdk-version 21 output/*.apk | tee output/SIGNATURES.txt
+          grep -q 'Verified using v1 scheme (JAR signing): true' output/SIGNATURES.txt
+          grep -q 'Verified using v2 scheme (APK Signature Scheme v2): true' output/SIGNATURES.txt
+          grep -q 'Verified using v3 scheme (APK Signature Scheme v3): true' output/SIGNATURES.txt
+          grep -q 'd1750063012c23b5229b92764317d52822dd375ae57357335ccf4ab6806212bf' output/SIGNATURES.txt
+      - name: Publish compatibility download
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create android-r7a-20261118 --draft --title "Android r7a - Signature Compatibility" \
+            --notes "Same game and resource downloader as r7. Adds explicit v1/JAR certificate files and v3 alongside v2, retaining the same signing certificate for upgrades. All non-META-INF game payloads match r7. Phone-specific installation recovery is not yet confirmed. First-launch content download is 3.93 GiB; Wi-Fi recommended."
+          gh release upload android-r7a-20261118 output/*.apk output/SHA256SUMS.txt output/SIGNATURES.txt
+          api="$(gh release view android-r7a-20261118 --json apiUrl --jq .apiUrl)"
+          gh api "$api" > release.json
+          python3 - <<'PY'
+          import json, os
+          m = json.load(open("patch/signature-delivery.json"))
+          apk = next(a for a in json.load(open("release.json"))["assets"] if a["name"] == m["outputFile"])
+          assert apk["state"] == "uploaded"
+          assert apk["size"] == m["bytes"]
+          assert apk["digest"] == "sha256:" + os.environ["EXPECTED_HASH"]
+          PY
+          gh release edit android-r7a-20261118 --draft=false --latest
