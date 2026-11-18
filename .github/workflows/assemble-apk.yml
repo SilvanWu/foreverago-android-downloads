@@ -1,0 +1,101 @@
+name: Assemble Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Draft staging release containing apk parts
+        required: true
+      release_tag:
+        description: Final Android release tag
+        required: true
+      sha256:
+        description: Locally verified complete APK SHA-256
+        required: true
+      bytes:
+        description: Locally verified complete APK size
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_TAG: ${{ inputs.source_tag }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EXPECTED_SHA256: ${{ inputs.sha256 }}
+      EXPECTED_BYTES: ${{ inputs.bytes }}
+    steps:
+      - name: Validate request and retrieve parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TAG" =~ ^apk-staging-[0-9a-f]{12}$ ]]
+          [[ "$RELEASE_TAG" =~ ^android-r[0-9]+-[0-9]{8}$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_BYTES" =~ ^[0-9]+$ ]]
+          mkdir -p staging output
+          gh release download "$SOURCE_TAG" --pattern 'apk.part*' --pattern 'apk-manifest.json' --dir staging
+      - name: Assemble and verify exact bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path("staging")
+          manifest = json.loads((root / "apk-manifest.json").read_text())
+          name = manifest["file"]
+          assert re.fullmatch(r"[A-Za-z0-9._-]+\.apk", name)
+          assert manifest["sha256"] == os.environ["EXPECTED_SHA256"]
+          assert manifest["bytes"] == int(os.environ["EXPECTED_BYTES"])
+          assert 0 < len(manifest["parts"]) <= 64
+          total = hashlib.sha256()
+          size = 0
+          output = pathlib.Path("output") / name
+          with output.open("wb") as target:
+              for index, part in enumerate(manifest["parts"]):
+                  assert part["name"] == f"apk.part{index:03d}"
+                  digest = hashlib.sha256()
+                  part_size = 0
+                  with (root / part["name"]).open("rb") as source:
+                      while data := source.read(1024 * 1024):
+                          target.write(data)
+                          digest.update(data)
+                          total.update(data)
+                          size += len(data)
+                          part_size += len(data)
+                  assert digest.hexdigest() == part["sha256"]
+                  assert part_size == part["bytes"]
+          assert total.hexdigest() == os.environ["EXPECTED_SHA256"]
+          assert size == int(os.environ["EXPECTED_BYTES"])
+          pathlib.Path("output/SHA256SUMS.txt").write_text(f"{total.hexdigest()}  {name}\n")
+          print(f"Verified {name}: {size} bytes, SHA256={total.hexdigest()}")
+          PY
+      - name: Publish verified APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" --draft --title "Android r7 - Auto Download" \
+            --notes "Install the APK. On first launch, download matching story content from GitHub; Wi-Fi is recommended. Completed parts survive interruptions. Subsequent launches work offline after verification. Non-development ARM64 + x86_64 build. Physical-phone compatibility and full-story completion are not yet certified; the DINER3 video-rendering issue remains under investigation."
+          gh release upload "$RELEASE_TAG" output/*.apk output/SHA256SUMS.txt
+          api="$(gh release view "$RELEASE_TAG" --json apiUrl --jq .apiUrl)"
+          gh api "$api" > release.json
+          python3 - <<'PY'
+          import json, os
+          assets = json.load(open("release.json"))["assets"]
+          apk = next(asset for asset in assets if asset["name"].endswith(".apk"))
+          assert apk["state"] == "uploaded"
+          assert apk["size"] == int(os.environ["EXPECTED_BYTES"])
+          assert apk["digest"] == "sha256:" + os.environ["EXPECTED_SHA256"]
+          print("GitHub APK digest matches the locally verified build.")
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false --latest
